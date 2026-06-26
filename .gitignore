@@ -1,0 +1,25 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# ReSharper / Rider
+.idea/
+_ReSharper*/
+*.DotSettings.user
+
+# Publish output
+publish/
+[Pp]ublish[Pp]rofiles/
+*.pubxml.user
+
+# Misc
+*.log
+[Dd]ebug/
+[Rr]elease/
