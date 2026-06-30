@@ -1,3 +1,19 @@
+// ============================================================================
+//  MainForm.cs  -  The Windows Forms user interface for the AES tool.
+//
+//  This is the "view" layer. It contains NO cryptography of its own; it only
+//  collects input from the user (file paths, password, thread count) and calls
+//  the engine in AesCrypto.cs (the AesCtrFile class).
+//
+//  The whole window is built in code (BuildLayout) instead of the visual
+//  designer, so there is no MainForm.Designer.cs to read - everything you see
+//  on screen is created here.
+//
+//  Threading note: encryption/decryption/benchmark run on a background thread
+//  via Task.Run + async/await. This keeps the UI responsive (the window does
+//  not freeze) while a large file is being processed.
+// ============================================================================
+
 using System;
 using System.Diagnostics;
 using System.Drawing;
@@ -10,19 +26,21 @@ namespace Parallel_AES_Tool
 {
     internal sealed class MainForm : Form
     {
-        private readonly TextBox inputPath = CreateTextBox();
-        private readonly TextBox outputPath = CreateTextBox();
-        private readonly TextBox password = CreateTextBox();
-        private readonly NumericUpDown parallelism = new NumericUpDown();
+        // ---- UI controls (created once, laid out in BuildLayout) ------------
+        private readonly TextBox inputPath = CreateTextBox();      // file to encrypt/decrypt
+        private readonly TextBox outputPath = CreateTextBox();     // where the result is written
+        private readonly TextBox password = CreateTextBox();       // password (masked on screen)
+        private readonly NumericUpDown parallelism = new NumericUpDown(); // CPU thread count selector
         private readonly Button encryptButton = new Button();
         private readonly Button decryptButton = new Button();
         private readonly Button benchmarkButton = new Button();
-        private readonly Label statusValue = new Label();
-        private readonly DataGridView benchmarkGrid = new DataGridView();
-        private readonly TextBox activityLog = new TextBox();
+        private readonly Label statusValue = new Label();          // short status line
+        private readonly DataGridView benchmarkGrid = new DataGridView(); // benchmark results table
+        private readonly TextBox activityLog = new TextBox();      // scrolling, timestamped log
 
         public MainForm()
         {
+            // Window-level appearance settings.
             Text = "High-Speed Parallel File Encryption Tool using AES";
             StartPosition = FormStartPosition.CenterScreen;
             MinimumSize = new Size(900, 760);
@@ -34,8 +52,12 @@ namespace Parallel_AES_Tool
             Log("Ready. Select a file, enter a password, and choose an action.");
         }
 
+        // Build the entire window: a 4-row vertical stack (header, file panel,
+        // benchmark panel, activity log) inside a TableLayoutPanel.
         private void BuildLayout()
         {
+            // Root layout: single column, 4 rows. The last row (the log) takes
+            // all remaining vertical space (Percent 100); the rest auto-size.
             TableLayoutPanel root = new TableLayoutPanel();
             root.Dock = DockStyle.Fill;
             root.Padding = new Padding(20);
@@ -47,6 +69,7 @@ namespace Parallel_AES_Tool
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
             Controls.Add(root);
 
+            // --- Row 0: dark title banner ---
             Panel header = new Panel { Dock = DockStyle.Top, Height = 72, BackColor = Color.FromArgb(24, 51, 85), Margin = new Padding(0, 0, 0, 14) };
             Label title = new Label { Text = "High-Speed Parallel File Encryption Tool using AES", ForeColor = Color.White, Font = new Font("Segoe UI Semibold", 16F), AutoSize = true, Location = new Point(18, 13) };
             Label subtitle = new Label { Text = "AES-256 CTR mode | Parallel CPU processing | File integrity verification", ForeColor = Color.FromArgb(218, 229, 242), AutoSize = true, Location = new Point(20, 43) };
@@ -54,6 +77,8 @@ namespace Parallel_AES_Tool
             header.Controls.Add(subtitle);
             root.Controls.Add(header, 0, 0);
 
+            // --- Row 1: file encryption/decryption panel ---
+            // A 4-column grid: [label] [field stretches] [browse button] [action buttons].
             GroupBox fileGroup = new GroupBox { Text = "File Encryption / Decryption", Dock = DockStyle.Top, Padding = new Padding(14), Height = 220, Margin = new Padding(0, 0, 0, 12) };
             TableLayoutPanel fileTable = CreateGrid(4);
             fileTable.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 105));
@@ -62,19 +87,24 @@ namespace Parallel_AES_Tool
             fileTable.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 190));
             fileGroup.Controls.Add(fileTable);
 
+            // Password is masked; thread count defaults to the machine's core count.
             password.UseSystemPasswordChar = true;
             parallelism.Minimum = 1;
             parallelism.Maximum = 64;
-            parallelism.Value = Math.Max(1, Environment.ProcessorCount);
+            parallelism.Value = Math.Max(1, Environment.ProcessorCount); // sensible default = all cores
             parallelism.Width = 100;
 
+            // Rows 0-2: input file / output file / password, each with a side button.
             AddLabeledRow(fileTable, 0, "Input file", inputPath, "Browse", delegate { BrowseInput(); });
             AddLabeledRow(fileTable, 1, "Output file", outputPath, "Save as", delegate { BrowseOutput(); });
             AddLabeledRow(fileTable, 2, "Password", password, "Clear", delegate { password.Clear(); });
+            // Row 3: the CPU thread count picker.
             Label threadLabel = new Label { Text = "CPU threads", AutoSize = true, Anchor = AnchorStyles.Left };
             fileTable.Controls.Add(threadLabel, 0, 3);
             fileTable.Controls.Add(parallelism, 1, 3);
 
+            // Encrypt / Decrypt buttons. Click handlers are async so the UI stays
+            // responsive; RunCrypto(true) encrypts, RunCrypto(false) decrypts.
             FlowLayoutPanel actions = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, Padding = new Padding(0, 0, 0, 0) };
             ConfigureButton(decryptButton, "Decrypt", Color.FromArgb(45, 117, 82));
             ConfigureButton(encryptButton, "Encrypt", Color.FromArgb(34, 94, 151));
@@ -86,6 +116,7 @@ namespace Parallel_AES_Tool
             fileTable.SetColumnSpan(actions, 2);
             root.Controls.Add(fileGroup, 0, 1);
 
+            // --- Row 2: benchmark panel (status line + run button + results grid) ---
             GroupBox benchmarkGroup = new GroupBox { Text = "Performance Benchmark - Five Parallel Strategies", Dock = DockStyle.Top, Padding = new Padding(14), Height = 275, Margin = new Padding(0, 0, 0, 12) };
             TableLayoutPanel benchmarkTable = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
             benchmarkTable.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
@@ -110,6 +141,7 @@ namespace Parallel_AES_Tool
             benchmarkGroup.Controls.Add(benchmarkTable);
             root.Controls.Add(benchmarkGroup, 0, 2);
 
+            // --- Row 3: activity log (fills remaining space) ---
             GroupBox logGroup = new GroupBox { Text = "Activity Log", Dock = DockStyle.Fill, Padding = new Padding(12) };
             activityLog.Dock = DockStyle.Fill;
             activityLog.Multiline = true;
@@ -121,11 +153,15 @@ namespace Parallel_AES_Tool
             root.Controls.Add(logGroup, 0, 3);
         }
 
+        // ---- Small UI factory / styling helpers -----------------------------
+
+        // A text box that fills its cell with a little right/vertical margin.
         private static TextBox CreateTextBox()
         {
             return new TextBox { Dock = DockStyle.Fill, Margin = new Padding(0, 4, 8, 4) };
         }
 
+        // A 4-column grid with evenly sized rows, used for the file panel.
         private static TableLayoutPanel CreateGrid(int rows)
         {
             TableLayoutPanel grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = rows };
@@ -133,6 +169,8 @@ namespace Parallel_AES_Tool
             return grid;
         }
 
+        // Add one "label : field [button]" row to a grid. The button's click is
+        // wired to the supplied handler (Browse / Save as / Clear).
         private void AddLabeledRow(TableLayoutPanel table, int row, string label, Control field, string buttonText, EventHandler action)
         {
             table.Controls.Add(new Label { Text = label, AutoSize = true, Anchor = AnchorStyles.Left }, 0, row);
@@ -142,6 +180,7 @@ namespace Parallel_AES_Tool
             table.Controls.Add(button, 2, row);
         }
 
+        // Apply the shared flat, coloured look to a primary action button.
         private static void ConfigureButton(Button button, string text, Color color)
         {
             button.Text = text;
@@ -157,6 +196,7 @@ namespace Parallel_AES_Tool
             button.Padding = new Padding(10, 0, 10, 0);
         }
 
+        // Configure the read-only results table and its six columns.
         private void ConfigureBenchmarkGrid()
         {
             benchmarkGrid.Dock = DockStyle.Fill;
@@ -173,6 +213,7 @@ namespace Parallel_AES_Tool
             benchmarkGrid.ColumnHeadersDefaultCellStyle.ForeColor = Color.FromArgb(24, 51, 85);
             benchmarkGrid.ColumnHeadersDefaultCellStyle.Font = new Font("Segoe UI Semibold", 8.5F);
             benchmarkGrid.EnableHeadersVisualStyles = false;
+            // Columns must match the order used when adding rows in RunBenchmark.
             benchmarkGrid.Columns.Add("Algorithm", "Algorithm");
             benchmarkGrid.Columns.Add("Strategy", "Parallel strategy");
             benchmarkGrid.Columns.Add("Time", "Time (ms)");
@@ -187,6 +228,9 @@ namespace Parallel_AES_Tool
             benchmarkGrid.Columns[5].Width = 70;
         }
 
+        // ---- File chooser handlers ------------------------------------------
+
+        // "Browse": pick an input file, then auto-suggest a matching output path.
         private void BrowseInput()
         {
             using (OpenFileDialog dialog = new OpenFileDialog { Title = "Select input file", Filter = "All files (*.*)|*.*" })
@@ -202,6 +246,9 @@ namespace Parallel_AES_Tool
             }
         }
 
+        // Suggest an output name based on the selected file:
+        //   * a normal file "report.pdf"     -> "report.pdf.tpcaes"   (encrypt)
+        //   * an encrypted ".tpcaes" file     -> "report-restored.pdf" (decrypt)
         private static string BuildSuggestedOutputPath(string selectedPath)
         {
             if (!selectedPath.EndsWith(".tpcaes", StringComparison.OrdinalIgnoreCase))
@@ -209,6 +256,8 @@ namespace Parallel_AES_Tool
                 return selectedPath + ".tpcaes";
             }
 
+            // Strip the trailing ".tpcaes" (7 chars) and add a "-restored" suffix
+            // before the original extension so we don't overwrite the source.
             string originalPath = selectedPath.Substring(0, selectedPath.Length - 7);
             string folder = Path.GetDirectoryName(originalPath);
             string extension = Path.GetExtension(originalPath);
@@ -216,6 +265,7 @@ namespace Parallel_AES_Tool
             return Path.Combine(folder, name + "-restored" + extension);
         }
 
+        // "Save as": let the user override the suggested output path.
         private void BrowseOutput()
         {
             using (SaveFileDialog dialog = new SaveFileDialog { Title = "Choose output file", Filter = "All files (*.*)|*.*", FileName = Path.GetFileName(outputPath.Text) })
@@ -224,9 +274,14 @@ namespace Parallel_AES_Tool
             }
         }
 
+        // ---- The three actions (encrypt / decrypt / benchmark) --------------
+
+        // Shared handler for Encrypt and Decrypt. Validates input, confirms
+        // overwrite, runs the engine on a background thread, then reports timing.
         private async Task RunCrypto(bool encrypt)
         {
             if (!ValidateFileAction()) return;
+            // Don't silently clobber an existing output file.
             if (File.Exists(outputPath.Text))
             {
                 DialogResult replace = MessageBox.Show(this, "The output file already exists. Replace it?", "Confirm Replace", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
@@ -236,6 +291,8 @@ namespace Parallel_AES_Tool
             Stopwatch timer = Stopwatch.StartNew();
             try
             {
+                // Task.Run pushes the CPU-heavy crypto onto a background thread so
+                // the UI thread stays free to redraw and stay responsive.
                 await Task.Run(delegate
                 {
                     if (encrypt) AesCtrFile.Encrypt(inputPath.Text, outputPath.Text, password.Text, (int)parallelism.Value);
@@ -245,20 +302,26 @@ namespace Parallel_AES_Tool
                 statusValue.Text = encrypt ? "Encryption complete" : "Decryption complete";
                 Log((encrypt ? "Encrypted" : "Decrypted") + " file in " + timer.ElapsedMilliseconds + " ms.");
                 Log("Output: " + outputPath.Text);
+                // After decryption, log the SHA-256 of the result so the user can
+                // confirm it matches the original file's hash if they want.
                 if (!encrypt) Log("Output SHA-256: " + Sha256(outputPath.Text));
                 MessageBox.Show(this, (encrypt ? "Encryption" : "Decryption") + " completed successfully.", "AES File Tool", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception ex)
             {
+                // A wrong password surfaces here as the HMAC "Authentication failed"
+                // exception thrown by AesCtrFile.Decrypt.
                 statusValue.Text = "Action failed";
                 Log("Error: " + ex.Message);
                 MessageBox.Show(this, ex.Message, "AES File Tool", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
-            finally { SetBusy(false, null); }
+            finally { SetBusy(false, null); } // always re-enable the buttons
         }
 
+        // Run the benchmark and fill the results grid + log with the numbers.
         private async Task RunBenchmark()
         {
+            // Benchmark needs a real file and a password (PBKDF2 needs input).
             if (String.IsNullOrWhiteSpace(inputPath.Text) || !File.Exists(inputPath.Text))
             {
                 MessageBox.Show(this, "Select an existing input file before running benchmark.", "AES File Tool", MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -272,9 +335,12 @@ namespace Parallel_AES_Tool
             SetBusy(true, "Benchmarking...");
             try
             {
+                // Run all strategies off the UI thread, then display the rows.
                 BenchmarkResult result = await Task.Run(delegate { return AesCtrFile.Benchmark(inputPath.Text, password.Text, (int)parallelism.Value); });
                 benchmarkGrid.Rows.Clear();
+                // First row = the sequential baseline (speedup 1.00x by definition).
                 benchmarkGrid.Rows.Add("Sequential AES-CTR", "Single worker baseline", result.SequentialMilliseconds, result.SequentialThroughputMBs.ToString("0.00"), "1.00x", "Yes");
+                // Then one row per parallel strategy.
                 foreach (ParallelBenchmarkResult algorithm in result.ParallelAlgorithms)
                 {
                     benchmarkGrid.Rows.Add(algorithm.Name, algorithm.Strategy, algorithm.Milliseconds, algorithm.ThroughputMBs.ToString("0.00"), algorithm.Speedup.ToString("0.00") + "x", algorithm.Verified ? "Yes" : "No");
@@ -292,6 +358,10 @@ namespace Parallel_AES_Tool
             finally { SetBusy(false, null); }
         }
 
+        // ---- Validation & UI state helpers ----------------------------------
+
+        // Pre-flight checks before encrypt/decrypt. Returns false (and shows a
+        // warning) if anything required is missing or invalid.
         private bool ValidateFileAction()
         {
             if (String.IsNullOrWhiteSpace(inputPath.Text) || !File.Exists(inputPath.Text))
@@ -309,6 +379,7 @@ namespace Parallel_AES_Tool
                 MessageBox.Show(this, "Enter a password.", "AES File Tool", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return false;
             }
+            // Refuse to read and write the same file at once (would corrupt it).
             if (String.Equals(Path.GetFullPath(inputPath.Text), Path.GetFullPath(outputPath.Text), StringComparison.OrdinalIgnoreCase))
             {
                 MessageBox.Show(this, "Output file must be different from input file.", "AES File Tool", MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -317,6 +388,8 @@ namespace Parallel_AES_Tool
             return true;
         }
 
+        // Enable/disable the action buttons and switch the wait cursor while a
+        // long operation is running, so the user can't start two at once.
         private void SetBusy(bool busy, string status)
         {
             encryptButton.Enabled = !busy;
@@ -326,11 +399,14 @@ namespace Parallel_AES_Tool
             UseWaitCursor = busy;
         }
 
+        // Append one timestamped line to the activity log.
         private void Log(string message)
         {
             activityLog.AppendText("[" + DateTime.Now.ToString("HH:mm:ss") + "] " + message + Environment.NewLine);
         }
 
+        // Compute the SHA-256 hash of a file as an uppercase hex string. Used to
+        // let the user verify a decrypted file matches the original.
         private static string Sha256(string path)
         {
             using (SHA256 sha = SHA256.Create())
